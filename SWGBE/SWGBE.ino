@@ -201,7 +201,6 @@ void parseData() {      // split the data into its parts
 
     int cntr = 0;
     char * ptr;
-    int tmp;
 
     ptr = strtok(receivedChars,",");
     waveParams[cntr] = atoi(ptr);
