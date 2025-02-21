@@ -6,7 +6,7 @@ It uses [IntervalTimer](https://www.pjrc.com/teensy/td_timing_IntervalTimer.html
 The program is looking for serial messages of the following form:
   <1,2,3,4,5,6,7>
   where,
-  1 = DAC channel 0-3
+  : 1 = DAC channel 0-3
   2 = waveform type (0 = asymm cos. 1 = square, 2 = ramp up, 3 = ramp down, 4 = ramp-up then ramp-down
   3 = wave duration in milliseconds (i.e., the length of one pulse of the waveform)
   4 = wave max amplitude (12 bit number, 0-4095)
