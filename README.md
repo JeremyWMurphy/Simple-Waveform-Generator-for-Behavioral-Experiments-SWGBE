@@ -15,6 +15,10 @@ Where,\
 \
 Example:\
 <3,2,20,2047,25,5,100>\
-This will (1) output the wave on channel 3, (2) it will be a ramping-up stimili, (3) it will take 20 ms to go from min-max, (4) it will have an amplitude of about half the maximum voltage output capable of your setup (e.g., without any amplification the max out of the DAC will be 5V. (5) there will be 25ms between repeats of the waveform, (6) the waveform will be repeated 5 times, and (7) there will be a delay of 100ms between when the output is triggered and when it actually begins.
+This will (1) output the wave on channel 3, (2) it will be a ramping-up stimili, (3) it will take 20 ms to go from min-max, (4) it will have an amplitude of about half the maximum voltage output capable of your setup (e.g., without any amplification the max out of the DAC will be 5V. (5) there will be 25ms between repeats of the waveform, (6) the waveform will be repeated 5 times, and (7) there will be a delay of 100ms between when the output is triggered and when it actually begins.\
+\
+The above example would look like this:
+
+![Alt text](https://github.com/JeremyWMurphy/Simple-Waveform-Generator-for-Behavioral-Experiments-SWGBE/blob/main/exampleWaveform.png)
 
 
