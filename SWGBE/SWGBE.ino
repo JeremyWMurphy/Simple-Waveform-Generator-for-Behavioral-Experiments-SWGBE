@@ -272,6 +272,9 @@ void parseData() { // split the data into its parts
     if ((waveType[chanSelect] == 0) & (waveDur[chanSelect] < SamplesNum)){
       Serial.println("The requested duration is too short for the whalestim, setting to minimum of 20 ms");
       waveDur[chanSelect] = SamplesNum;
+    } else if ((waveType[chanSelect] == 0) & (waveDur[chanSelect] % 100 != 0)){
+      Serial.println("The requested duration for the whalestim must be divisible by 20, shifting duration up to next multiple of 20.");
+      waveDur[chanSelect] = waveDur[chanSelect] + (waveDur[chanSelect] % 100);
     }
 
     // set amplitude
