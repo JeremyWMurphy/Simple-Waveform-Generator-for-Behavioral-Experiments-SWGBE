@@ -3,43 +3,58 @@
 #include <Wire.h>
 #include <Bounce.h>
 
-const int Fs = 5000; // sampling rate
-const int waveMax = 4095; // it's a 12bit dac, so this will always be the max voltage out
-const int trigPin = 0; // digital channel to trigger the wave with a ttl
+const uint Fs = 5000; // sampling rate
+const uint waveMax = 4095; // it's a 12bit dac, so this will always be the max voltage out
+const bool frameWait = true; // wait for next frame
+const float frameBufferFraction = 0.10;       // Buffer as a fraction of the frame period (10%)
+
+const uint trigPin = 0; // digital channel to trigger the wave with a ttl
+const uint framePin = 11;   // Read frame period waveform
 
 // waveform parameters to be set over serial for each of the 4 DAC channels
-volatile int waveType[4] = {1,1,1,1}; // wave types: 0 = whale, 1 = square
-volatile int waveDur[4] = {0,0,0,0}; // duration of pulse, fixed for whale right now, set via serial in ms, converted to sample points
-volatile int waveAmp[4] = {0,0,0,0}; // max voltage amplitude, in 12bit - 0-4095 
-volatile int waveIPI[4] = {0,0,0,0}; // duration between pulses, set via serial in ms, converted to sample points
-volatile int waveReps[4] = {0,0,0,0}; // number of times to repeat wave pulse and interpulse interval
-volatile int rampStep[4] = {0,0,0,0}; // specific to ramping variables, still in development
-volatile int whaleStep[4] = {0,0,0,0}; // specific to ramping variables, still in development
-volatile int waveBase[4] = {0,0,0,0}; // baseline prior to stimulus onset, in ms, allows for offsets between the stimuli, set via serial in ms, converted to sample points
+volatile uint waveType[4] = {1,1,1,1}; // wave types: 0 = whale, 1 = square
+volatile uint waveDur[4] = {0,0,0,0}; // duration of pulse, fixed for whale right now, set via serial in ms, converted to sample points
+volatile uint waveAmp[4] = {0,0,0,0}; // max voltage amplitude, in 12bit - 0-4095 
+volatile uint waveIPI[4] = {0,0,0,0}; // duration between pulses, set via serial in ms, converted to sample points
+volatile uint waveReps[4] = {0,0,0,0}; // number of times to repeat wave pulse and interpulse interval
+volatile uint rampStep[4] = {0,0,0,0}; // specific to ramping variables, still in development
+volatile uint whaleStep[4] = {0,0,0,0}; // specific to ramping variables, still in development
+volatile uint waveBase[4] = {0,0,0,0}; // baseline prior to stimulus onset, in ms, allows for offsets between the stimuli, set via serial in ms, converted to sample points
 
-volatile int wavIncrmntr[4] = {0,0,0,0}; // for keeping track of where we are in a given stimulus presentation
-volatile int repCntr[4] = {0,0,0,0}; // for keeping track of pulse repitions
-volatile int ipiCntr[4] = {0,0,0,0}; // for keeping track of where we are in an interpulse interval
-volatile int BaseCntr[4] = {0,0,0,0}; // for keeping track of where we are in a baseline period
-volatile int whaleCntr[4] = {0,0,0,0}; //
-
-volatile int chanSelect = 0; // 
-volatile int waveParams[7] = {0,0,0,0,0,0,0};
-volatile int curVal[4] = {0,0,0,0};
-
+// waveform tracking
+volatile uint wavIncrmntr[4] = {0,0,0,0}; // for keeping track of where we are in a given stimulus presentation
+volatile uint repCntr[4] = {0,0,0,0}; // for keeping track of pulse repitions
+volatile uint ipiCntr[4] = {0,0,0,0}; // for keeping track of where we are in an interpulse interval
+volatile uint BaseCntr[4] = {0,0,0,0}; // for keeping track of where we are in a baseline period
+volatile uint whaleCntr[4] = {0,0,0,0}; //
+volatile uint waveParams[7] = {0,0,0,0,0,0,0};
 volatile bool inIpi[4] = {false,false,false,false};
 volatile bool inBase[4] = {false,false,false,false};
 volatile bool stimOn[4] = {false,false,false,false};
-volatile bool fire = false;
+volatile uint curVal[4] = {0,0,0,0};
+volatile uint chanSelect = 0; // 
 
+// Serial coms
 const byte numChars = 255;
-char receivedChars[numChars];
-const int nVarIn = 7;
-bool newData = false;
+volatile char receivedChars[numChars];
+volatile bool newData = false;
+const uint nVarIn = 7;
+
+// opto avoid variables
+volatile uint32_t loopCount = 0;
+volatile uint32_t lastFrameT = 0;
+volatile uint32_t thisFrameT = 0;
+volatile unsigned long framePeriod = 0.0;
+volatile uint32_t frameStart = 0;
+volatile bool frameState = false;
+volatile uint frm_strt = 0;
+volatile uint frm_end = 0;
+volatile bool fire = false;
+volatile bool arm = false;
+volatile bool mask[4] = {true,true,true,true};
 
 Adafruit_MCP4728 mcp;
 IntervalTimer t1;
-Bounce trigger = Bounce(trigPin,50); 
 
 void setup() {
 
@@ -49,7 +64,7 @@ void setup() {
   Wire.begin();
   
   // Try to initialize
-  if (!mcp.begin(0x64)) {
+  if (!mcp.begin(0x60)) { // this could be 0x60 or 0x64
     Serial.println("Failed to find MCP4728 chip"); 
   } else{
     Serial.println("Found MCP4728 chip");
@@ -60,7 +75,10 @@ void setup() {
   }
   
   Wire.setClock(1000000); // holy fucking shit, this must be set after mcp.begin or else it doesn't work
-  
+
+  attachInterrupt(framePin, frameCounter, RISING);
+  attachInterrupt(trigPin, pollTrigger, RISING);
+   
   t1.begin(waveRun, 1E6/Fs);
 
 }
@@ -73,7 +91,6 @@ void waveRun(){
   recvWithStartEndMarkers();
   parseData();
   
-  pollTrigger(); // check for triggers
   waveWrite(); // set values
 
   mcp.setChannelValue(MCP4728_CHANNEL_A, curVal[0]); // send the value to the dac
@@ -81,32 +98,26 @@ void waveRun(){
   mcp.setChannelValue(MCP4728_CHANNEL_C, curVal[2]); // send the value to the dac
   mcp.setChannelValue(MCP4728_CHANNEL_D, curVal[3]); // send the value to the dac
 
-}
+  loopCount++;
 
-void pollTrigger(){
-  // check for a trigger
-  if (trigger.update()){
-    if (trigger.risingEdge()){
-      fire = true;
-      for (int i = 0; i< 4; i++){
-        stimOn[i] = true;
-        inBase[i] = true;
-      }
-    }
-  }
 }
 
 void waveWrite(){
+
   if (fire){ // if ttl received
+
     for (int i = 0; i < 4; i++){ // for each dac channel
+
       if (stimOn[i]) {   // if there's a stim on
         if (inBase[i]){ // is it in baseline?
           curVal[i] = 0; // then output stays at 0
           BaseCntr[i]++; // increment the baseline counter
-          if (BaseCntr[i]>=waveBase[i]){ // check if we're at the end of the baseline
+
+          if (BaseCntr[i]>=waveBase[i]){          
             inBase[i] = false; // if we've gone past the baseline period, then end it
-            BaseCntr[i] = 0; // and reset counter
+            BaseCntr[i] = 0; // and reset counter          
           }
+
         } else if (inIpi[i]){ // check if in an inter-pulse interval         
           curVal[i] = 0; // if yes, output is 0
           ipiCntr[i]++; // increment
@@ -114,7 +125,8 @@ void waveWrite(){
             inIpi[i] = false; // we're out of ipi period
             ipiCntr[i] = 0; // reset counter
           }
-        } else { // if not in baseline or in an ipi, then we are presenting the waveform   
+        } else { // if not in baseline or in an ipi, then we are presenting the waveform  
+          // asign wave value based on wave type 
           if (waveType[i] == 0){ // whale stim
             if (wavIncrmntr[i] % whaleStep[i] == 0){
               curVal[i] = map(asymCos[whaleCntr[i]], 0, waveMax, 0, waveAmp[i]);
@@ -132,28 +144,56 @@ void waveWrite(){
             } else {
               curVal[i] = linspace((float) waveDur[i]/2, (float) waveAmp[i], 0 , wavIncrmntr[i]-waveDur[i]/2); 
             }
+          } else if (waveType[i] == 5){ // opto avoid frame, only square atm, pulse on every other frame
+
+            if (frameState){ // only on every other frame
+              
+              
+              if ((uint)(loopCount-frameStart) > frm_strt && wavIncrmntr[i] == 0) { //
+                mask[i] = false;
+              }
+
+              if (wavIncrmntr[i] == 0 && frm_end < (uint)(loopCount-frameStart) + waveDur[i]) {
+                mask[i] = true;
+                curVal[i] = 0;
+              }
+              
+                
+              if (!mask[i]){ 
+                curVal[i] = waveAmp[i];  
+              }
+            
+            } else {
+              mask[i] = true;
+              curVal[i] = 0;
+            }
           }
-          wavIncrmntr[i] = wavIncrmntr[i] + 1;
+
+           wavIncrmntr[i] = wavIncrmntr[i] + 1; 
+             
         }
-        if (wavIncrmntr[i] >= waveDur[i]){ // if it's the end of one wave
-          if (repCntr[i] < waveReps[i]-1){ // but if it's not the end of the number of wave repititions
-            repCntr[i] = repCntr[i] + 1; // increment rep counter
-            whaleCntr[i] = 0;
-            wavIncrmntr[i] = 0; // reset wave indexer
-            inIpi[i] = true; // go into ipi
-            curVal[i] = 0;
-          } else { // else that's the end of the requested signal, so reset stuff
-            repCntr[i] = 0;
-            whaleCntr[i] = 0;
-            wavIncrmntr[i] = 0;
-            inIpi[i] = false; // go into ipi
-            stimOn[i] = false;
-            curVal[i] = 0;
-          }
+
+      }
+
+      if (wavIncrmntr[i] >= waveDur[i]){ // if it's the end of one wave
+        if (repCntr[i] < waveReps[i]-1){ // but if it's not the end of the number of wave repititions
+          repCntr[i] = repCntr[i] + 1; // increment rep counter
+          whaleCntr[i] = 0;
+          wavIncrmntr[i] = 0; // reset wave indexer
+          inIpi[i] = true; // go into ipi
+          curVal[i] = 0;
+        } else { // else that's the end of the requested signal, so reset stuff
+          repCntr[i] = 0;
+          whaleCntr[i] = 0;
+          wavIncrmntr[i] = 0;
+          inIpi[i] = false; // go into ipi
+          stimOn[i] = false;
+          curVal[i] = 0;
         }
-      }      
-    }
-  }
+      }
+    } 
+  }     
+  
   // check if all stimuli are done
   for (int i = 0; i < 4; i++){
     if (stimOn[i]){
@@ -161,48 +201,49 @@ void waveWrite(){
     }
     fire = false; 
   }
+
 }
 
 void recvWithStartEndMarkers() {
-    static boolean recvInProgress = false;
-    static byte ndx = 0;
-    char startMarker = '<';
-    char endMarker = '>';
-    char rc;
-    while (Serial.available() > 0 && newData == false) {
-        rc = Serial.read();
 
-        if (recvInProgress == true) {
-            if (rc != endMarker) {
-                receivedChars[ndx] = rc;
-                ndx++;
-                if (ndx >= numChars) {
-                    ndx = numChars - 1;
-                }
-            }
-            else {
-                receivedChars[ndx] = '\0'; // terminate the string
-                recvInProgress = false;
-                ndx = 0;
-                newData = true;
-            }
-        }
+  static boolean recvInProgress = false;
+  static byte ndx = 0;
+  const char startMarker = '<';
+  const char endMarker = '>';
+  volatile char rc;
 
-        else if (rc == startMarker) {
-            recvInProgress = true;
+  while (Serial.available() > 0 && newData == false) {
+      
+    rc = Serial.read();
+
+    if (recvInProgress == true) {
+      if (rc != endMarker) {
+        receivedChars[ndx] = rc;
+        ndx++;
+        if (ndx >= numChars) {
+            ndx = numChars - 1;
         }
+      } else {
+        receivedChars[ndx] = '\0'; // terminate the string
+        recvInProgress = false;
+        ndx = 0;
+        newData = true;
+      }
+    } else if (rc == startMarker) {
+      recvInProgress = true;
     }
+  }
+
 }
 
-
-void parseData() {      // split the data into its parts
+void parseData() { // split the data into its parts
 
   if (newData == true) {
 
     int cntr = 0;
     char * ptr;
 
-    ptr = strtok(receivedChars,",");
+    ptr = strtok((char *) receivedChars,",");
     waveParams[cntr] = atoi(ptr);
     cntr++;
 
@@ -224,28 +265,30 @@ void parseData() {      // split the data into its parts
 
     // set wave type
     waveType[chanSelect] = waveParams[1];
-    // set duration
-    waveDur[chanSelect] = (int) round((waveParams[2]/1000.0) * Fs);
+
+    // set duration in sample points
+    waveDur[chanSelect] = (volatile uint) round((waveParams[2]/1000.0) * Fs);
 
     if ((waveType[chanSelect] == 0) & (waveDur[chanSelect] < SamplesNum)){
-      Serial.println("The requested duration is too short for the whalestim, setting to minimum of 10 ms");
+      Serial.println("The requested duration is too short for the whalestim, setting to minimum of 20 ms");
       waveDur[chanSelect] = SamplesNum;
     }
 
     // set amplitude
     waveAmp[chanSelect] = waveParams[3];
     // set interpulse interval
-    waveIPI[chanSelect] = (int) round((waveParams[4]/1000.0) * Fs);
+    waveIPI[chanSelect] = (volatile uint) round((waveParams[4]/1000.0) * Fs);
     // set number of pulses
     waveReps[chanSelect] = waveParams[5]; 
     // get baseline length
-    waveBase[chanSelect] = (int) round((waveParams[6]/1000.0) * Fs);
-
+            
+    waveBase[chanSelect] = (volatile uint) round((waveParams[6]/1000.0) * Fs);
+    
     // this is always computed, but only used if ramping up or down
-    rampStep[chanSelect] = (int) ceil((float) waveAmp[chanSelect]/waveDur[chanSelect]);
+    rampStep[chanSelect] = (volatile uint) ceil((float) waveAmp[chanSelect]/waveDur[chanSelect]);
 
     // this is always computed, but only used if using whale stim
-    whaleStep[chanSelect] = (int) ceil((float) waveDur[chanSelect]/SamplesNum); // how quickly to step through the asymCosine
+    whaleStep[chanSelect] = (volatile uint) ceil((float) waveDur[chanSelect]/SamplesNum); // how quickly to step through the asymCosine
 
     Serial.println("---------");
     for (int i = 0; i < 4; i++){
@@ -271,9 +314,9 @@ void parseData() {      // split the data into its parts
       Serial.print(" ms");
       Serial.println("");
     }
+    
     Serial.println("---------");
-
-  newData = false;
+    newData = false;
 
   }
 }
@@ -281,6 +324,64 @@ void parseData() {      // split the data into its parts
 int linspace(float const n, float const d1, float const d2, int const i){
   float n1 = n-1;
   return round(d1 + (i)*(d2 - d1)/n1);
+}
+
+void pollTrigger(){
+  
+  if (frameWait){
+    arm = true; 
+  } else {
+    fire = true;
+  }
+
+}
+  
+void frameCounter() {
+
+  if (arm){
+
+    fire = true;
+    
+    frm_strt = (volatile uint)(framePeriod * frameBufferFraction);
+    frm_end =  (volatile uint)(framePeriod) - frm_strt;
+
+    frameState = true;
+    frameStart = loopCount;
+
+    Serial.println("Triggered!");
+    Serial.print("frame triggered ");
+    Serial.print(frameStart);
+    Serial.print(", stim begin on frame ");
+    Serial.print(frm_strt);
+    Serial.print(", stim end on frame ");
+    Serial.println(frm_end);
+
+    Serial.print("Frame Period ");
+    Serial.print(framePeriod);
+    Serial.print(" samples or ");
+    Serial.print(framePeriod/ (float) Fs);
+    Serial.print(" seconds");
+    Serial.println("");
+    Serial.println();
+
+    for (int i = 0; i< 4; i++){
+      stimOn[i] = true;
+      inBase[i] = true;
+    }
+
+    arm = false;
+
+  } else {
+    
+    frameState = !frameState;
+    frameStart = loopCount;
+
+  }
+
+  lastFrameT = thisFrameT;
+  thisFrameT = loopCount;
+  framePeriod = (thisFrameT - lastFrameT); 
+
 }
  
 void loop(){
